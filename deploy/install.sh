@@ -33,6 +33,14 @@ apt_install() {
   return 1
 }
 
+# Vrai paquet Chromium de Debian. Ubuntu ne propose sous ce nom qu'un paquet de transition vers un snap,
+# qui ne peut pas s'installer dans un conteneur LXC.
+debian_chromium() {
+  local record
+  record=$(apt-cache show --no-all-versions chromium 2>/dev/null) || return 1
+  grep -q '^Package: chromium$' <<<"$record" && ! grep -q '^Version:.*snap' <<<"$record"
+}
+
 [ "$(id -u)" -eq 0 ] || die "lancez ce script en root."
 command -v apt-get >/dev/null 2>&1 || die "seules Debian et Ubuntu sont prises en charge."
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -74,10 +82,10 @@ ok "Node.js $(node --version)"
 if [ "$WITH_CHROMIUM" = "yes" ]; then
   info "Chromium"
   CHROMIUM_FAILED="Chromium n'a pas pu être installé (détails ci-dessus) : Glaneur fonctionnera sans rendu JavaScript."
-  if apt-cache show chromium >/dev/null 2>&1; then
+  if debian_chromium; then
     apt_install chromium fonts-liberation || warn "$CHROMIUM_FAILED"
   elif [ "$(dpkg --print-architecture)" = "amd64" ]; then
-    # Ubuntu ne fournit Chromium qu'en snap, inutilisable dans un LXC : on prend Google Chrome.
+    # Ubuntu et les autres : Google Chrome, depuis le dépôt de Google.
     install -d -m 0755 /etc/apt/keyrings
     curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor --yes -o /etc/apt/keyrings/google-chrome.gpg
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" >/etc/apt/sources.list.d/google-chrome.list
