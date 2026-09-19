@@ -1,0 +1,100 @@
+/* Glaneur design tokens — graphite ink on cool paper, with a set of highlighter markers.
+   Each marker colour belongs to one field of a feed item, everywhere in the interface. */
+
+:root {
+  --paper: #eceee9;
+  --sheet: #f9faf7;
+  --sheet-2: #f2f4ef;
+  --ink: #1b1e24;
+  --ink-2: #4b515b;
+  --ink-3: #7a808a;
+  --rule: #d6dad1;
+  --rule-2: #e3e6de;
+  --shade: rgba(27, 30, 36, 0.05);
+
+  --m-item: #1b1e24;
+  --m-title: #ffe14a;
+  --m-link: #8fd0ff;
+  --m-description: #cfbbff;
+  --m-date: #ffa6cc;
+  --m-image: #9eeaa9;
+  --m-author: #ffc68d;
+  --marker-ink: #1b1e24;
+
+  --primary: #ffe14a;
+  --primary-hover: #ffd21f;
+
+  --ok: #2d8a57;
+  --ok-soft: #dcefe2;
+  --error: #c2433a;
+  --error-soft: #f6dfdb;
+  --warn: #a8701a;
+  --warn-soft: #f5ead4;
+  --run: #2f69d6;
+  --run-soft: #dfe8fa;
+
+  --radius-s: 6px;
+  --radius: 10px;
+  --radius-l: 16px;
+  --shadow-1: 0 1px 0 rgba(27, 30, 36, 0.03), 0 1px 3px rgba(27, 30, 36, 0.07);
+  --shadow-2: 0 18px 50px rgba(27, 30, 36, 0.14), 0 3px 10px rgba(27, 30, 36, 0.08);
+
+  --font: 'Recursive Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --axes-linear: 'CASL' 0, 'MONO' 0, 'CRSV' 0.5;
+  --axes-casual: 'CASL' 1, 'MONO' 0, 'CRSV' 0.5;
+  --axes-mono: 'CASL' 0, 'MONO' 1, 'CRSV' 0;
+
+  --gutter: clamp(16px, 4vw, 40px);
+  --topbar: 60px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --paper: #14171c;
+    --sheet: #1b1f26;
+    --sheet-2: #20252d;
+    --ink: #e8eaee;
+    --ink-2: #b2b8c2;
+    --ink-3: #838a95;
+    --rule: #2d333c;
+    --rule-2: #252a32;
+    --shade: rgba(255, 255, 255, 0.04);
+    --m-item: #e8eaee;
+    --ok: #5cc28a;
+    --ok-soft: #1d3327;
+    --error: #ef7b70;
+    --error-soft: #3a2220;
+    --warn: #e0a64b;
+    --warn-soft: #35291a;
+    --run: #7ea8f5;
+    --run-soft: #1e2a40;
+    --shadow-1: 0 1px 0 rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.35);
+    --shadow-2: 0 18px 50px rgba(0, 0, 0, 0.5), 0 3px 10px rgba(0, 0, 0, 0.35);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --paper: #14171c;
+  --sheet: #1b1f26;
+  --sheet-2: #20252d;
+  --ink: #e8eaee;
+  --ink-2: #b2b8c2;
+  --ink-3: #838a95;
+  --rule: #2d333c;
+  --rule-2: #252a32;
+  --shade: rgba(255, 255, 255, 0.04);
+  --m-item: #e8eaee;
+  --ok: #5cc28a;
+  --ok-soft: #1d3327;
+  --error: #ef7b70;
+  --error-soft: #3a2220;
+  --warn: #e0a64b;
+  --warn-soft: #35291a;
+  --run: #7ea8f5;
+  --run-soft: #1e2a40;
+  --shadow-1: 0 1px 0 rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 18px 50px rgba(0, 0, 0, 0.5), 0 3px 10px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
+}

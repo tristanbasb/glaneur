@@ -1,0 +1,175 @@
+// Headless Chromium rendering for JavaScript-heavy pages (optional: needs a system Chromium).
+import fs from 'node:fs';
+import puppeteer, { type Browser, type CookieData } from 'puppeteer-core';
+import { PAGE_WIDTH, type RenderOptions, type RequestOptions } from '../../shared/types.js';
+import { config } from '../config.js';
+import { getSettings } from '../settings.js';
+import { HttpError, log, Semaphore } from '../util.js';
+import { consentCookies } from './consent.js';
+
+const CANDIDATES: Record<string, string[]> = {
+  linux: ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome', '/snap/bin/chromium'],
+  darwin: ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'],
+  win32: [
+    `${process.env.LOCALAPPDATA ?? ''}\\Google\\Chrome\\Application\\chrome.exe`,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ],
+};
+
+let resolvedPath: string | null | undefined;
+
+export function browserPath(): string | null {
+  if (resolvedPath !== undefined) return resolvedPath;
+  const list = config.chromiumPath ? [config.chromiumPath] : (CANDIDATES[process.platform] ?? []);
+  resolvedPath =
+    list.find((p) => {
+      try {
+        return fs.statSync(p).isFile();
+      } catch {
+        return false;
+      }
+    }) ?? null;
+  return resolvedPath;
+}
+
+// Some Windows launchers pass on __COMPAT_LAYER (compatibility mode): Chrome and Edge then exit immediately.
+function browserEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== '__COMPAT_LAYER'));
+}
+
+const semaphore = new Semaphore(config.browserConcurrency);
+let browserPromise: Promise<Browser> | null = null;
+let idleTimer: NodeJS.Timeout | null = null;
+let activeRenders = 0;
+
+async function getBrowser(): Promise<Browser> {
+  const executablePath = browserPath();
+  if (!executablePath) {
+    throw new Error('Rendu JavaScript indisponible : aucun Chromium installé sur le serveur (voir la documentation).');
+  }
+  if (!browserPromise) {
+    browserPromise = puppeteer
+      .launch({
+        executablePath,
+        env: browserEnv(),
+        headless: true,
+        defaultViewport: { width: PAGE_WIDTH, height: 900 },
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--mute-audio',
+          '--hide-scrollbars',
+          '--disable-extensions',
+          '--disable-background-networking',
+        ],
+      })
+      .then((browser) => {
+        browser.on('disconnected', () => {
+          browserPromise = null;
+        });
+        log.info('Chromium démarré');
+        return browser;
+      })
+      .catch((err) => {
+        browserPromise = null;
+        throw err;
+      });
+  }
+  return browserPromise;
+}
+
+function scheduleIdleClose() {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (activeRenders > 0 || !browserPromise) return;
+    const pending = browserPromise;
+    browserPromise = null;
+    pending
+      .then((b) => b.close())
+      .then(() => log.info('Chromium arrêté (inactif)'))
+      .catch(() => undefined);
+  }, 3 * 60_000);
+  idleTimer.unref();
+}
+
+function parseCookies(header: string, url: string): CookieData[] {
+  const domain = new URL(url).hostname;
+  return header
+    .split(';')
+    .map((pair) => pair.trim())
+    .filter((pair) => pair.includes('='))
+    .map((pair) => {
+      const i = pair.indexOf('=');
+      return { name: pair.slice(0, i).trim(), value: pair.slice(i + 1).trim(), domain, path: '/' };
+    });
+}
+
+const SCROLL_SCRIPT = `(async () => {
+  for (let i = 0; i < 6; i++) {
+    window.scrollBy(0, window.innerHeight);
+    await new Promise((r) => setTimeout(r, 350));
+  }
+  window.scrollTo(0, 0);
+})()`;
+
+export async function renderPage(
+  url: string,
+  render: RenderOptions,
+  request?: RequestOptions,
+  opts: { lightweight?: boolean } = {},
+): Promise<{ html: string; finalUrl: string; status: number }> {
+  return semaphore.use(async () => {
+    activeRenders++;
+    try {
+      const browser = await getBrowser();
+      const context = await browser.createBrowserContext();
+      try {
+        const page = await context.newPage();
+        const settings = getSettings();
+        await page.setUserAgent({ userAgent: request?.userAgent || settings.userAgent });
+        const headers: Record<string, string> = { 'accept-language': settings.acceptLanguage };
+        for (const [k, v] of Object.entries(request?.headers ?? {})) if (k.trim() && v) headers[k.trim().toLowerCase()] = v;
+        await page.setExtraHTTPHeaders(headers);
+        const own = request?.cookies ? parseCookies(request.cookies, url) : [];
+        const consent = consentCookies(url).filter((c) => !own.some((o) => o.name === c.name));
+        if (own.length || consent.length) await context.setCookie(...own, ...consent.map((c) => ({ ...c, path: '/' })));
+        await page.setRequestInterception(true);
+        // Pages mark images as loaded and lay out around them and their fonts: skip those only when nobody looks.
+        page.on('request', (req) => {
+          const type = req.resourceType();
+          if (type === 'media' || (opts.lightweight && (type === 'image' || type === 'font'))) req.abort().catch(() => undefined);
+          else req.continue().catch(() => undefined);
+        });
+
+        const timeout = (request?.timeoutSec ?? 35) * 1000;
+        const response = await page.goto(url, { waitUntil: 'networkidle2', timeout });
+        const status = response?.status() ?? 200;
+        if (render.waitFor) await page.waitForSelector(render.waitFor, { timeout: 15_000 }).catch(() => undefined);
+        if (render.scroll) await page.evaluate(SCROLL_SCRIPT).catch(() => undefined);
+        if (render.delayMs) await new Promise((r) => setTimeout(r, Math.min(render.delayMs ?? 0, 15_000)));
+        const html = await page.content();
+        if (status >= 400 && html.length < 3000) throw new HttpError(status, url);
+        return { html, finalUrl: page.url(), status };
+      } finally {
+        await context.close().catch(() => undefined);
+      }
+    } finally {
+      activeRenders--;
+      scheduleIdleClose();
+    }
+  });
+}
+
+export async function closeBrowser(): Promise<void> {
+  if (!browserPromise) return;
+  const pending = browserPromise;
+  browserPromise = null;
+  await pending.then((b) => b.close()).catch(() => undefined);
+}

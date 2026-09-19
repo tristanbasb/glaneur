@@ -1,0 +1,22 @@
+[Unit]
+Description=Glaneur - flux RSS sur mesure
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=glaneur
+Group=glaneur
+WorkingDirectory=/opt/glaneur
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/glaneur
+EnvironmentFile=/etc/glaneur/glaneur.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/glaneur/dist/node/server/index.js
+Restart=on-failure
+RestartSec=5
+# Pas d'isolation par espaces de noms (PrivateTmp, ProtectSystem…) :
+# ces options échouent dans beaucoup de conteneurs LXC non privilégiés.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

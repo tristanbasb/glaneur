@@ -1,0 +1,19 @@
+services:
+  glaneur:
+    build:
+      context: .
+      args:
+        WITH_CHROMIUM: "false"
+    container_name: glaneur
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - glaneur-data:/data
+    environment:
+      TZ: Europe/Paris
+      # GLANEUR_PASSWORD: "choisissez-un-mot-de-passe"
+      # PUBLIC_URL: "https://glaneur.maison.lan"
+
+volumes:
+  glaneur-data:
