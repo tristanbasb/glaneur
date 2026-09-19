@@ -16,7 +16,22 @@ PORT=${PORT:-8080}
 
 info() { printf '\033[1;33m>\033[0m %s\n' "$*"; }
 ok() { printf '\033[1;32mOK\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;31m!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mErreur :\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Installe des paquets sans leurs « recommandés » (services de bureau inutiles sur un serveur, qui échouent
+# souvent dans un conteneur). En cas d'échec, affiche la fin de la sortie d'apt.
+apt_install() {
+  local log
+  log=$(mktemp)
+  if apt-get install -y -qq --no-install-recommends "$@" >"$log" 2>&1; then
+    rm -f "$log"
+    return 0
+  fi
+  tail -n 25 "$log" >&2
+  rm -f "$log"
+  return 1
+}
 
 [ "$(id -u)" -eq 0 ] || die "lancez ce script en root."
 command -v apt-get >/dev/null 2>&1 || die "seules Debian et Ubuntu sont prises en charge."
@@ -34,9 +49,11 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
-info "Paquets système"
-apt-get update -qq
-apt-get install -y -qq ca-certificates curl gnupg tar >/dev/null
+if ! command -v curl >/dev/null 2>&1 || ! command -v gpg >/dev/null 2>&1 || [ ! -f /etc/ssl/certs/ca-certificates.crt ]; then
+  info "Paquets système"
+  apt-get update -qq
+  apt_install ca-certificates curl gnupg tar || die "installation des paquets système impossible (détails ci-dessus)."
+fi
 
 node_ok() {
   command -v node >/dev/null 2>&1 &&
@@ -49,21 +66,23 @@ if ! node_ok; then
   curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
   echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" >/etc/apt/sources.list.d/nodesource.list
   apt-get update -qq
-  apt-get install -y -qq nodejs >/dev/null
+  apt_install nodejs || die "installation de Node.js impossible (détails ci-dessus)."
 fi
 node_ok || die "Node.js 22.13 ou plus récent est requis."
 ok "Node.js $(node --version)"
 
 if [ "$WITH_CHROMIUM" = "yes" ]; then
   info "Chromium"
+  CHROMIUM_FAILED="Chromium n'a pas pu être installé (détails ci-dessus) : Glaneur fonctionnera sans rendu JavaScript."
   if apt-cache show chromium >/dev/null 2>&1; then
-    apt-get install -y -qq chromium fonts-liberation >/dev/null
+    apt_install chromium fonts-liberation || warn "$CHROMIUM_FAILED"
   elif [ "$(dpkg --print-architecture)" = "amd64" ]; then
     # Ubuntu ne fournit Chromium qu'en snap, inutilisable dans un LXC : on prend Google Chrome.
+    install -d -m 0755 /etc/apt/keyrings
     curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor --yes -o /etc/apt/keyrings/google-chrome.gpg
     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" >/etc/apt/sources.list.d/google-chrome.list
     apt-get update -qq
-    apt-get install -y -qq google-chrome-stable fonts-liberation >/dev/null
+    apt_install google-chrome-stable fonts-liberation || warn "$CHROMIUM_FAILED"
   else
     info "Chromium indisponible pour cette distribution : rendu JavaScript désactivé."
   fi
