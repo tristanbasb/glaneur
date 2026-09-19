@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { consentCookies, cookieHeader, wallRedirect } from '../src/server/core/consent.js';
+import { consentCookies, cookieHeader, leftAfterConsent, wallRedirect } from '../src/server/core/consent.js';
 import { prepareViewHtml } from '../src/server/view.js';
 
 describe('consent walls', () => {
@@ -20,6 +20,13 @@ describe('consent walls', () => {
     expect(wallRedirect('https://www.youtube.com/@x', 'https://consent.youtube.com/m?continue=x')).toBe('consent.youtube.com');
     expect(wallRedirect('https://site.fr/compte', 'https://site.fr/login?next=/compte')).toBe('site.fr');
     expect(wallRedirect('http://lemonde.fr/', 'https://www.lemonde.fr/')).toBeNull();
+  });
+
+  it('tells a refusal that leads elsewhere from leaving a consent page', () => {
+    expect(leftAfterConsent('https://www.20minutes.fr/', 'https://www.20minutes.fr/', 'https://membre.20minutes.fr/abonnement/inscription/')).toBe(true);
+    expect(leftAfterConsent('https://www.yahoo.com/', 'https://consent.yahoo.com/v2/collectConsent?sessionId=1', 'https://fr.yahoo.com/?guccounter=1')).toBe(false);
+    expect(leftAfterConsent('https://site.fr/actus', 'https://site.fr/actus', 'https://www.site.fr/actus/?utm=1')).toBe(false);
+    expect(leftAfterConsent('https://www.yahoo.com/', 'https://www.yahoo.com/', 'https://fr.yahoo.com/?p=us')).toBe(false);
   });
 
   it('hides consent banners in the visual selector without changing the page structure', () => {

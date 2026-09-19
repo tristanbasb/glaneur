@@ -19,6 +19,7 @@
     "pack": "node scripts/pack.mjs"
   },
   "dependencies": {
+    "@duckduckgo/autoconsent": "^16.40.0",
     "@fastify/cookie": "^11.1.2",
     "@fastify/static": "^10.1.3",
     "@mozilla/readability": "^0.6.0",

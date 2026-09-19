@@ -50,6 +50,28 @@ export function wallRedirect(url: string, finalUrl: string): string | null {
   return null;
 }
 
+/** Same path on the same site: www.yahoo.com/ and fr.yahoo.com/?p=us are one page, a language redirect apart. */
+function samePage(a: string, b: string): boolean {
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    const site = (u: URL) => u.hostname.split('.').slice(-2).join('.');
+    const route = (u: URL) => u.pathname.replace(/\/+$/, '');
+    return site(x) === site(y) && route(x) === route(y);
+  } catch {
+    return a === b;
+  }
+}
+
+/**
+ * Answering the consent popup sent the browser to another page (a "refuse and subscribe" wall), instead of
+ * back from a consent page to the one requested.
+ */
+export function leftAfterConsent(requested: string, before: string, after: string): boolean {
+  if (samePage(before, after) || samePage(requested, after)) return false;
+  return !wallRedirect(requested, before);
+}
+
 /** Root elements of common consent managers: they cover the page, and their buttons need scripts. */
 export const CONSENT_BANNERS = [
   '#didomi-host', // Didomi

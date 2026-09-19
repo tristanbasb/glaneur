@@ -126,6 +126,7 @@ Ajoutez alors `TRUST_PROXY=true` et `PUBLIC_URL=https://glaneur.maison.lan` dans
 
 - Commencez par l’analyse : la « meilleure piste » est souvent juste, il ne reste qu’à vérifier l’aperçu.
 - Dans l’éditeur, désignez d’abord l’**Élément** (le bloc qui se répète), puis les champs. Les flèches à côté du sélecteur élargissent ou resserrent le bloc ; les autres champs sont recalculés.
+- **Bandeaux de cookies :** avec le rendu JavaScript, Glaneur y répond lui-même grâce aux règles [autoconsent](https://github.com/duckduckgo/autoconsent) de DuckDuckGo. Il refuse quand le site le permet, et accepte sinon (quand refuser mène à une page d’abonnement, par exemple). Chaque lecture se fait dans une session jetée ensuite. Sans rendu, les bandeaux connus sont simplement masqués dans la sélection visuelle.
 - Les compteurs à droite de chaque champ indiquent sur combien d’éléments il a été trouvé : orange si partiel, rouge si absent.
 - Préférez des sélecteurs basés sur des classes explicites (`article.post`) plutôt que sur la position (`div:nth-of-type(3)`).
 - Si la page apparaît vide ou incomplète, activez **JavaScript** dans la barre de l’éditeur.

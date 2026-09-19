@@ -5,7 +5,8 @@ import { PAGE_WIDTH, type RenderOptions, type RequestOptions } from '../../share
 import { config } from '../config.js';
 import { getSettings } from '../settings.js';
 import { HttpError, log, Semaphore } from '../util.js';
-import { consentCookies } from './consent.js';
+import { type ConsentAction, consentScript, settleConsent } from './autoconsent.js';
+import { consentCookies, leftAfterConsent } from './consent.js';
 
 const CANDIDATES: Record<string, string[]> = {
   linux: ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome', '/snap/bin/chromium'],
@@ -68,6 +69,10 @@ async function getBrowser(): Promise<Browser> {
           '--hide-scrollbars',
           '--disable-extensions',
           '--disable-background-networking',
+          // Keeps third-party frames (consent popups often live in one) in the page's process, where the consent
+          // script is injected. Isolation matters little in a throwaway context, and it saves memory.
+          '--disable-site-isolation-trials',
+          '--disable-features=IsolateOrigins,site-per-process',
         ],
       })
       .then((browser) => {
@@ -119,47 +124,87 @@ const SCROLL_SCRIPT = `(async () => {
   window.scrollTo(0, 0);
 })()`;
 
+export interface RenderResult {
+  html: string;
+  finalUrl: string;
+  status: number;
+  /** How the consent popup was answered, if there was one. */
+  consent: string | null;
+}
+
+interface RenderJob {
+  browser: Browser;
+  url: string;
+  render: RenderOptions;
+  request?: RequestOptions;
+  lightweight: boolean;
+}
+
+/** One render in a fresh browser context. Refusing cookies may send the page elsewhere: the render then gives up. */
+function renderIn(job: RenderJob, action: 'optOut'): Promise<RenderResult | null>;
+function renderIn(job: RenderJob, action: 'optIn'): Promise<RenderResult>;
+async function renderIn({ browser, url, render, request, lightweight }: RenderJob, action: ConsentAction): Promise<RenderResult | null> {
+  const context = await browser.createBrowserContext();
+  try {
+    const page = await context.newPage();
+    const settings = getSettings();
+    await page.setUserAgent({ userAgent: request?.userAgent || settings.userAgent });
+    const headers: Record<string, string> = { 'accept-language': settings.acceptLanguage };
+    for (const [k, v] of Object.entries(request?.headers ?? {})) if (k.trim() && v) headers[k.trim().toLowerCase()] = v;
+    await page.setExtraHTTPHeaders(headers);
+    const own = request?.cookies ? parseCookies(request.cookies, url) : [];
+    const consent = consentCookies(url).filter((c) => !own.some((o) => o.name === c.name));
+    if (own.length || consent.length) await context.setCookie(...own, ...consent.map((c) => ({ ...c, path: '/' })));
+    await page.evaluateOnNewDocument(consentScript(action));
+    await page.setRequestInterception(true);
+    // Pages mark images as loaded and lay out around them and their fonts: skip those only when nobody looks.
+    page.on('request', (req) => {
+      const type = req.resourceType();
+      if (type === 'media' || (lightweight && (type === 'image' || type === 'font'))) req.abort().catch(() => undefined);
+      else req.continue().catch(() => undefined);
+    });
+
+    // The consent popup may be answered while the page is still loading, and the answer may replace the document:
+    // remember the first one the browser showed.
+    let firstDocument: string | null = null;
+    page.on('framenavigated', (frame) => {
+      if (!firstDocument && frame === page.mainFrame()) firstDocument = frame.url();
+    });
+
+    const timeout = (request?.timeoutSec ?? 35) * 1000;
+    const response = await page.goto(url, { waitUntil: 'networkidle2', timeout });
+    const status = response?.status() ?? 200;
+    const answered = await settleConsent(page);
+    const before: string = firstDocument ?? url;
+    if (action === 'optOut' && leftAfterConsent(url, before, page.url())) return null;
+    if (render.waitFor) await page.waitForSelector(render.waitFor, { timeout: 15_000 }).catch(() => undefined);
+    if (render.scroll) await page.evaluate(SCROLL_SCRIPT).catch(() => undefined);
+    if (render.delayMs) await new Promise((r) => setTimeout(r, Math.min(render.delayMs ?? 0, 15_000)));
+    // A consent answer may reload the page: read it once the new document has settled.
+    const html = await page.content().catch(async () => {
+      await page.waitForNetworkIdle({ idleTime: 500, timeout: 8000 }).catch(() => undefined);
+      return page.content();
+    });
+    if (status >= 400 && html.length < 3000) throw new HttpError(status, url);
+    return { html, finalUrl: page.url(), status, consent: answered };
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+}
+
 export async function renderPage(
   url: string,
   render: RenderOptions,
   request?: RequestOptions,
   opts: { lightweight?: boolean } = {},
-): Promise<{ html: string; finalUrl: string; status: number }> {
+): Promise<RenderResult> {
   return semaphore.use(async () => {
     activeRenders++;
     try {
-      const browser = await getBrowser();
-      const context = await browser.createBrowserContext();
-      try {
-        const page = await context.newPage();
-        const settings = getSettings();
-        await page.setUserAgent({ userAgent: request?.userAgent || settings.userAgent });
-        const headers: Record<string, string> = { 'accept-language': settings.acceptLanguage };
-        for (const [k, v] of Object.entries(request?.headers ?? {})) if (k.trim() && v) headers[k.trim().toLowerCase()] = v;
-        await page.setExtraHTTPHeaders(headers);
-        const own = request?.cookies ? parseCookies(request.cookies, url) : [];
-        const consent = consentCookies(url).filter((c) => !own.some((o) => o.name === c.name));
-        if (own.length || consent.length) await context.setCookie(...own, ...consent.map((c) => ({ ...c, path: '/' })));
-        await page.setRequestInterception(true);
-        // Pages mark images as loaded and lay out around them and their fonts: skip those only when nobody looks.
-        page.on('request', (req) => {
-          const type = req.resourceType();
-          if (type === 'media' || (opts.lightweight && (type === 'image' || type === 'font'))) req.abort().catch(() => undefined);
-          else req.continue().catch(() => undefined);
-        });
-
-        const timeout = (request?.timeoutSec ?? 35) * 1000;
-        const response = await page.goto(url, { waitUntil: 'networkidle2', timeout });
-        const status = response?.status() ?? 200;
-        if (render.waitFor) await page.waitForSelector(render.waitFor, { timeout: 15_000 }).catch(() => undefined);
-        if (render.scroll) await page.evaluate(SCROLL_SCRIPT).catch(() => undefined);
-        if (render.delayMs) await new Promise((r) => setTimeout(r, Math.min(render.delayMs ?? 0, 15_000)));
-        const html = await page.content();
-        if (status >= 400 && html.length < 3000) throw new HttpError(status, url);
-        return { html, finalUrl: page.url(), status };
-      } finally {
-        await context.close().catch(() => undefined);
-      }
+      const job: RenderJob = { browser: await getBrowser(), url, render, request, lightweight: !!opts.lightweight };
+      // Cookies are refused first. Some sites answer a refusal with their subscription page: then start over,
+      // accepting them.
+      return (await renderIn(job, 'optOut')) ?? (await renderIn(job, 'optIn'));
     } finally {
       activeRenders--;
       scheduleIdleClose();

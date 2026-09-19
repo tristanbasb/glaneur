@@ -99,9 +99,16 @@ function Results({ url, data, onRender, open }: { url: string; data: AnalyzeResu
           <TriangleAlert size={18} aria-hidden />
           <div className="callout-body">
             <p>
-              <strong>Cette adresse renvoie vers une page de consentement ou de connexion ({data.hints.redirectWall}).</strong> Glaneur voit cette page à la
-              place du contenu. Pour y accéder, copiez les cookies de votre navigateur pour ce site dans le champ « Cookies » des réglages du flux.
+              <strong>Cette adresse renvoie vers une page de consentement ou de connexion ({data.hints.redirectWall}).</strong>{' '}
+              {!data.hints.rendered && data.hints.browserAvailable
+                ? 'Avec le rendu JavaScript, Glaneur répond lui-même aux bandeaux de cookies.'
+                : 'Glaneur voit cette page à la place du contenu. Pour y accéder, copiez les cookies de votre navigateur pour ce site dans le champ « Cookies » des réglages du flux.'}
             </p>
+            {!data.hints.rendered && data.hints.browserAvailable && (
+              <Button size="sm" icon={<RotateCw size={14} />} onClick={onRender}>
+                Analyser avec le rendu JavaScript
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -172,7 +179,7 @@ function Results({ url, data, onRender, open }: { url: string; data: AnalyzeResu
         </section>
       )}
 
-      {data.hints.needsRender && (
+      {data.hints.needsRender && !data.hints.redirectWall && (
         <div className="callout callout-warn">
           <TriangleAlert size={18} aria-hidden />
           <div className="callout-body">
