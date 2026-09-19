@@ -96,6 +96,7 @@ function Editor({ feedId, initial }: { feedId: string | null; initial: FeedInput
   const [width, setWidth] = useState<'desktop' | 'mobile'>('desktop');
   const [reloadKey, setReloadKey] = useState(0);
   const [jsonField, setJsonField] = useState<FieldKey | null>(null);
+  const [hidden, setHidden] = useState<string[]>([]);
   const pickerRef = useRef<PickerHandle>(null);
   const source = draft.source;
   const [urlInput, setUrlInput] = useState(source.type === 'feed' ? '' : source.url);
@@ -145,10 +146,28 @@ function Editor({ feedId, initial }: { feedId: string | null; initial: FeedInput
 
   // ---- Visual selection ----
   const engineState = useMemo<EngineState>(() => {
-    if (source.type === 'html') return { mode, itemSelector: source.itemSelector, fields: source.fields, region: '' };
-    if (source.type === 'watch') return { mode, itemSelector: '', fields: {}, region: source.selector };
-    return { mode: null, itemSelector: '', fields: {}, region: '' };
-  }, [mode, source]);
+    if (source.type === 'html') return { mode, itemSelector: source.itemSelector, fields: source.fields, region: '', hidden };
+    if (source.type === 'watch') return { mode, itemSelector: '', fields: {}, region: source.selector, hidden };
+    return { mode: null, itemSelector: '', fields: {}, region: '', hidden };
+  }, [mode, source, hidden]);
+
+  // A real click (on a consent button, say) happens in Chromium on the server. The cookies it earns join the feed's
+  // request settings, which reloads the page and the preview with them.
+  const system = useQuery({ queryKey: ['system'], queryFn: api.system, staleTime: 5 * 60_000 });
+  const clickPage = useMutation({
+    mutationFn: (target: { selector: string; text: string }) => api.click({ url: source.type === 'feed' ? '' : source.url, request: draft.options.request, ...target }),
+    onMutate: () => {
+      toast.loading('Glaneur clique dans son navigateur…', { id: 'click-page' });
+    },
+    onSuccess: (res) => {
+      setDraft((d) => ({ ...d, options: { ...d.options, request: { ...d.options.request, cookies: res.cookies || d.options.request.cookies } } }));
+      setMode(null);
+      toast.success(res.cookies ? 'Bouton cliqué : les cookies obtenus sont enregistrés dans les réglages du flux.' : 'Bouton cliqué, mais le site n’a déposé aucun cookie.', { id: 'click-page' });
+    },
+    onError: (err) => {
+      toast.error(err.message, { id: 'click-page' });
+    },
+  });
 
   const applyItem = (itemSelector: string, count: number) => {
     if (source.type !== 'html') return;
@@ -160,6 +179,14 @@ function Editor({ feedId, initial }: { feedId: string | null; initial: FeedInput
   const handlePick = (r: PickResult) => {
     if (r.kind === 'error') {
       toast.error(r.message);
+      return;
+    }
+    if (r.kind === 'hide') {
+      setHidden((h) => (h.includes(r.selector) ? h : [...h, r.selector]));
+      return;
+    }
+    if (r.kind === 'click') {
+      if (!clickPage.isPending) clickPage.mutate({ selector: r.selector, text: r.text });
       return;
     }
     if (r.kind === 'region') {
@@ -336,7 +363,16 @@ function Editor({ feedId, initial }: { feedId: string | null; initial: FeedInput
                   <Toggle checked={renderEnabled} onChange={(v) => setDraft((d) => (d.source.type === 'html' || d.source.type === 'watch' ? { ...d, source: { ...d.source, render: { scroll: v, ...d.source.render, enabled: v } } } : d))} label="JavaScript" />
                 </div>
               </div>
-              <Palette variant={source.type === 'watch' ? 'watch' : 'html'} mode={mode} onMode={setMode} stats={stats} />
+              <Palette
+                variant={source.type === 'watch' ? 'watch' : 'html'}
+                mode={mode}
+                onMode={setMode}
+                stats={stats}
+                canClick={system.data?.browser.available ?? false}
+                clicking={clickPage.isPending}
+                hiddenCount={hidden.length}
+                onRestore={() => setHidden([])}
+              />
               <VisualPicker
                 ref={pickerRef}
                 url={source.url}

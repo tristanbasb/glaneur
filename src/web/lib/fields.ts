@@ -24,6 +24,20 @@ export const FIELD_META: Record<PickMode, FieldMeta> = {
 
 export const FIELD_ORDER: FieldKey[] = ['title', 'link', 'description', 'date', 'image', 'author'];
 
+/** Tools that act on the page shown in the visual selector rather than designate a field. */
+export const TOOL_META = {
+  click: {
+    label: 'Cliquer',
+    hint: 'Cliquez sur le bouton à actionner (celui d’un bandeau de cookies, par exemple) : Glaneur le clique dans son navigateur et garde les cookies obtenus · Échap pour arrêter',
+    hex: '#2fc4b2',
+  },
+  hide: {
+    label: 'Masquer',
+    hint: 'Cliquez sur ce qui gêne pour le masquer dans l’aperçu, le flux n’en tient pas compte · Échap pour arrêter',
+    hex: '#ff6b57',
+  },
+} as const;
+
 export const ATTR_OPTIONS: Record<FieldKey, Array<{ value: string; label: string }>> = {
   title: [
     { value: 'text', label: 'Texte' },

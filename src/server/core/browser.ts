@@ -1,12 +1,12 @@
 // Headless Chromium rendering for JavaScript-heavy pages (optional: needs a system Chromium).
 import fs from 'node:fs';
-import puppeteer, { type Browser, type CookieData } from 'puppeteer-core';
+import puppeteer, { type Browser, type BrowserContext, type CookieData, type Page } from 'puppeteer-core';
 import { PAGE_WIDTH, type RenderOptions, type RequestOptions } from '../../shared/types.js';
 import { config } from '../config.js';
 import { getSettings } from '../settings.js';
 import { HttpError, log, Semaphore } from '../util.js';
 import { type ConsentAction, consentScript, settleConsent } from './autoconsent.js';
-import { consentCookies, leftAfterConsent } from './consent.js';
+import { consentCookies, cookieHeaderFor, leftAfterConsent } from './consent.js';
 
 const CANDIDATES: Record<string, string[]> = {
   linux: ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome', '/snap/bin/chromium'],
@@ -104,6 +104,19 @@ function scheduleIdleClose() {
   idleTimer.unref();
 }
 
+/** Runs a task with the shared browser, one context at a time per slot, and closes the browser once idle. */
+function withBrowser<T>(task: (browser: Browser) => Promise<T>): Promise<T> {
+  return semaphore.use(async () => {
+    activeRenders++;
+    try {
+      return await task(await getBrowser());
+    } finally {
+      activeRenders--;
+      scheduleIdleClose();
+    }
+  });
+}
+
 function parseCookies(header: string, url: string): CookieData[] {
   const domain = new URL(url).hostname;
   return header
@@ -114,6 +127,27 @@ function parseCookies(header: string, url: string): CookieData[] {
       const i = pair.indexOf('=');
       return { name: pair.slice(0, i).trim(), value: pair.slice(i + 1).trim(), domain, path: '/' };
     });
+}
+
+/** A page set up like a visitor's: user agent, languages, headers and cookies (the user's, then consent choices). */
+async function openPage(context: BrowserContext, url: string, request: RequestOptions | undefined, lightweight: boolean): Promise<Page> {
+  const page = await context.newPage();
+  const settings = getSettings();
+  await page.setUserAgent({ userAgent: request?.userAgent || settings.userAgent });
+  const headers: Record<string, string> = { 'accept-language': settings.acceptLanguage };
+  for (const [k, v] of Object.entries(request?.headers ?? {})) if (k.trim() && v) headers[k.trim().toLowerCase()] = v;
+  await page.setExtraHTTPHeaders(headers);
+  const own = request?.cookies ? parseCookies(request.cookies, url) : [];
+  const consent = consentCookies(url).filter((c) => !own.some((o) => o.name === c.name));
+  if (own.length || consent.length) await context.setCookie(...own, ...consent.map((c) => ({ ...c, path: '/' })));
+  await page.setRequestInterception(true);
+  // Pages mark images as loaded and lay out around them and their fonts: skip those only when nobody looks.
+  page.on('request', (req) => {
+    const type = req.resourceType();
+    if (type === 'media' || (lightweight && (type === 'image' || type === 'font'))) req.abort().catch(() => undefined);
+    else req.continue().catch(() => undefined);
+  });
+  return page;
 }
 
 const SCROLL_SCRIPT = `(async () => {
@@ -146,24 +180,8 @@ function renderIn(job: RenderJob, action: 'optIn'): Promise<RenderResult>;
 async function renderIn({ browser, url, render, request, lightweight }: RenderJob, action: ConsentAction): Promise<RenderResult | null> {
   const context = await browser.createBrowserContext();
   try {
-    const page = await context.newPage();
-    const settings = getSettings();
-    await page.setUserAgent({ userAgent: request?.userAgent || settings.userAgent });
-    const headers: Record<string, string> = { 'accept-language': settings.acceptLanguage };
-    for (const [k, v] of Object.entries(request?.headers ?? {})) if (k.trim() && v) headers[k.trim().toLowerCase()] = v;
-    await page.setExtraHTTPHeaders(headers);
-    const own = request?.cookies ? parseCookies(request.cookies, url) : [];
-    const consent = consentCookies(url).filter((c) => !own.some((o) => o.name === c.name));
-    if (own.length || consent.length) await context.setCookie(...own, ...consent.map((c) => ({ ...c, path: '/' })));
+    const page = await openPage(context, url, request, lightweight);
     await page.evaluateOnNewDocument(consentScript(action));
-    await page.setRequestInterception(true);
-    // Pages mark images as loaded and lay out around them and their fonts: skip those only when nobody looks.
-    page.on('request', (req) => {
-      const type = req.resourceType();
-      if (type === 'media' || (lightweight && (type === 'image' || type === 'font'))) req.abort().catch(() => undefined);
-      else req.continue().catch(() => undefined);
-    });
-
     // The consent popup may be answered while the page is still loading, and the answer may replace the document:
     // remember the first one the browser showed.
     let firstDocument: string | null = null;
@@ -192,22 +210,64 @@ async function renderIn({ browser, url, render, request, lightweight }: RenderJo
   }
 }
 
-export async function renderPage(
-  url: string,
-  render: RenderOptions,
-  request?: RequestOptions,
-  opts: { lightweight?: boolean } = {},
-): Promise<RenderResult> {
-  return semaphore.use(async () => {
-    activeRenders++;
+export function renderPage(url: string, render: RenderOptions, request?: RequestOptions, opts: { lightweight?: boolean } = {}): Promise<RenderResult> {
+  return withBrowser(async (browser) => {
+    const job: RenderJob = { browser, url, render, request, lightweight: !!opts.lightweight };
+    // Cookies are refused first. Some sites answer a refusal with their subscription page: then start over,
+    // accepting them.
+    return (await renderIn(job, 'optOut')) ?? (await renderIn(job, 'optIn'));
+  });
+}
+
+// Evaluated as strings: the server is compiled without DOM types.
+const clickSelector = (selector: string) => `(() => {
+  const el = document.querySelector(${JSON.stringify(selector)});
+  if (!el) return false;
+  el.scrollIntoView({ block: 'center' });
+  el.click();
+  return true;
+})()`;
+const clickText = (text: string) => `(() => {
+  const want = ${JSON.stringify(text.replace(/\s+/g, ' ').trim().toLowerCase())};
+  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  for (const el of document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]')) {
+    if (norm(el.innerText || el.value || el.getAttribute('aria-label')) === want) {
+      el.click();
+      return true;
+    }
+  }
+  return false;
+})()`;
+
+/** Clicks the element designated in the editor, found by its selector or, failing that, by its label. */
+async function clickTarget(page: Page, { selector, text }: { selector: string; text: string }): Promise<boolean> {
+  // Popups often appear a moment after the page has loaded.
+  if (selector) await page.waitForSelector(selector, { timeout: 8000 }).catch(() => undefined);
+  if (selector && (await page.evaluate(clickSelector(selector)).catch(() => false))) return true;
+  if (!text) return false;
+  for (const frame of page.frames()) {
+    if (await frame.evaluate(clickText(text)).catch(() => false)) return true;
+  }
+  return false;
+}
+
+/**
+ * Clicks a button of the page the way a visitor would (a consent banner's, say), and returns the cookies that then
+ * apply to the page: sent with every later fetch, they let the feed see what the visitor saw.
+ */
+export function clickThrough(url: string, request: RequestOptions | undefined, target: { selector: string; text: string }): Promise<{ cookies: string; finalUrl: string }> {
+  return withBrowser(async (browser) => {
+    const context = await browser.createBrowserContext();
     try {
-      const job: RenderJob = { browser: await getBrowser(), url, render, request, lightweight: !!opts.lightweight };
-      // Cookies are refused first. Some sites answer a refusal with their subscription page: then start over,
-      // accepting them.
-      return (await renderIn(job, 'optOut')) ?? (await renderIn(job, 'optIn'));
+      const page = await openPage(context, url, request, false);
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: (request?.timeoutSec ?? 35) * 1000 });
+      if (!(await clickTarget(page, target))) {
+        throw new Error('Glaneur ne retrouve pas ce bouton dans la page qu’il a chargée : relisez la page, puis cliquez de nouveau.');
+      }
+      await page.waitForNetworkIdle({ idleTime: 800, timeout: 10_000 }).catch(() => undefined);
+      return { cookies: cookieHeaderFor(await context.cookies(), url), finalUrl: page.url() };
     } finally {
-      activeRenders--;
-      scheduleIdleClose();
+      await context.close().catch(() => undefined);
     }
   });
 }

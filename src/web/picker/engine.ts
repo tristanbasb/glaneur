@@ -3,21 +3,25 @@ import { isUsableClass } from '../../shared/css';
 import { findListGroups } from '../../shared/detect';
 import { consensusSelector, type DomAdapter, groupSelector, normText, safeQuery, signature, uniqueSelector } from '../../shared/selectors';
 import type { FieldKey, FieldRule, FieldRules } from '../../shared/types';
-import { FIELD_META, FIELD_ORDER, type PickMode } from '../lib/fields';
+import { FIELD_META, FIELD_ORDER, type PickMode, TOOL_META } from '../lib/fields';
 
-export type EngineMode = PickMode | 'region' | null;
+export type EngineMode = PickMode | 'region' | 'click' | 'hide' | null;
 
 export interface EngineState {
   mode: EngineMode;
   itemSelector: string;
   fields: FieldRules;
   region: string;
+  /** Elements put out of the way in the view (a popup, say): the feed does not depend on them. */
+  hidden: string[];
 }
 
 export type PickResult =
   | { kind: 'item'; itemSelector: string; count: number }
   | { kind: 'field'; field: FieldKey; rule: FieldRule; itemSelector?: string }
   | { kind: 'region'; selector: string }
+  | { kind: 'click'; selector: string; text: string }
+  | { kind: 'hide'; selector: string }
   | { kind: 'error'; message: string };
 
 export interface EngineStats {
@@ -33,6 +37,9 @@ interface Callbacks {
 }
 
 const SILENT = new Set(['script', 'style', 'noscript', 'template', 'svg']);
+
+/** What a visitor would click on: the button or link around the pointer. */
+const ACTIONABLE = 'button, a[href], [role="button"], input[type="submit"], input[type="button"], label, summary';
 
 export function visibleText(node: Node): string {
   let out = '';
@@ -61,6 +68,22 @@ function elementFrom(target: EventTarget | null): Element | null {
   return node as Element | null;
 }
 
+function restoreStyle(el: Element, style: string | null): void {
+  if (style === null) el.removeAttribute('style');
+  else el.setAttribute('style', style);
+}
+
+function modeLabel(mode: Exclude<EngineMode, null>): string {
+  if (mode === 'region') return 'Zone';
+  if (mode === 'click' || mode === 'hide') return TOOL_META[mode].label;
+  return FIELD_META[mode].label;
+}
+
+function modeColor(mode: Exclude<EngineMode, null>): string {
+  if (mode === 'click' || mode === 'hide') return TOOL_META[mode].hex;
+  return mode === 'region' || mode === 'item' ? '#ffe14a' : FIELD_META[mode].hex;
+}
+
 // --z is the zoom applied to the page: strokes and labels are divided by it to keep their on-screen size.
 const OVERLAY_CSS = `
 :host { all: initial; --z: 1; }
@@ -87,7 +110,7 @@ export class PickerEngine {
   private hover: HTMLElement;
   private hoverLabel: HTMLElement;
   private pageStyle: HTMLStyleElement;
-  private state: EngineState = { mode: null, itemSelector: '', fields: {}, region: '' };
+  private state: EngineState = { mode: null, itemSelector: '', fields: {}, region: '', hidden: [] };
   private groups: Array<{ members: Element[]; score: number }> | null = null;
   private lastTarget: Element | null = null;
   private frame = 0;
@@ -95,6 +118,9 @@ export class PickerEngine {
   private layoutKey = '';
   private statsKey = '';
   private zoom = 1;
+  /** Hidden elements and scroll-locked roots, with their original style attribute. */
+  private hiddenEls = new Map<HTMLElement, string | null>();
+  private unlocked = new Map<HTMLElement, string | null>();
   private cleanup: Array<() => void> = [];
 
   constructor(
@@ -157,6 +183,7 @@ export class PickerEngine {
     this.state = { ...this.state, ...next };
     this.doc.documentElement.classList.toggle('glaneur-picking', !!this.state.mode);
     if (!this.state.mode) this.hideHover();
+    this.applyHidden();
     this.redraw();
   }
 
@@ -265,6 +292,37 @@ export class PickerEngine {
     }
   }
 
+  /** Hides the elements put out of the way, and gives back the scrolling that a hidden popup had locked. */
+  private applyHidden(): void {
+    const wanted = new Set<HTMLElement>();
+    for (const selector of this.state.hidden) {
+      for (const el of safeQuery(this.adapter, null, selector)) wanted.add(el as HTMLElement);
+    }
+    for (const [el, style] of this.hiddenEls) {
+      if (wanted.has(el)) continue;
+      restoreStyle(el, style);
+      this.hiddenEls.delete(el);
+    }
+    for (const el of wanted) {
+      if (this.hiddenEls.has(el)) continue;
+      this.hiddenEls.set(el, el.getAttribute('style'));
+      el.style.setProperty('display', 'none', 'important');
+      this.hideHover();
+    }
+    const view = this.doc.defaultView;
+    for (const root of [this.doc.documentElement, this.doc.body]) {
+      if (!root || !view) continue;
+      if (this.hiddenEls.size && !this.unlocked.has(root) && view.getComputedStyle(root).overflowY === 'hidden') {
+        this.unlocked.set(root, root.getAttribute('style'));
+        root.style.setProperty('overflow', 'auto', 'important');
+      } else if (!this.hiddenEls.size && this.unlocked.has(root)) {
+        restoreStyle(root, this.unlocked.get(root) ?? null);
+        this.unlocked.delete(root);
+      }
+    }
+    this.schedule();
+  }
+
   /** Zoom applied to the page on screen: overlay strokes and labels compensate for it. */
   setZoom(zoom: number): void {
     this.zoom = zoom > 0 ? zoom : 1;
@@ -283,25 +341,22 @@ export class PickerEngine {
       this.hideHover();
       return;
     }
-    let el = raw;
-    if (mode === 'item') el = this.groupFor(raw)?.find((m) => m === raw || m.contains(raw)) ?? raw;
-    else if (mode !== 'region') el = this.snap(mode, raw, this.doc.body);
+    const el = this.targetFor(mode, raw);
     const win = this.doc.defaultView;
     if (!win) return;
     const r = el.getBoundingClientRect();
     const z = this.zoom;
     const pad = 3 / z;
-    const color = mode === 'region' || mode === 'item' ? '#ffe14a' : FIELD_META[mode].hex;
     Object.assign(this.hover.style, {
       left: `${r.left + win.scrollX - pad}px`,
       top: `${r.top + win.scrollY - pad}px`,
       width: `${r.width + pad * 2}px`,
       height: `${r.height + pad * 2}px`,
-      boxShadow: `0 0 0 ${4 / z}px ${color}`,
+      boxShadow: `0 0 0 ${4 / z}px ${modeColor(mode)}`,
     });
     this.hoverLabel.replaceChildren();
     const strong = this.doc.createElement('b');
-    strong.textContent = mode === 'region' ? 'Zone' : FIELD_META[mode].label;
+    strong.textContent = modeLabel(mode);
     this.hoverLabel.append(strong, ` ${signature(this.adapter, el)}`);
     // The label keeps its on-screen size (scaled by 1/z), so it hangs from its bottom edge when placed above.
     const gap = 8 / z;
@@ -324,6 +379,33 @@ export class PickerEngine {
   }
 
   // ---- Selection logic ---------------------------------------------------------------------------
+
+  /** What a click acts on in each mode: the repeated block, a field's element, a button, or a whole popup. */
+  private targetFor(mode: Exclude<EngineMode, null>, raw: Element): Element {
+    switch (mode) {
+      case 'item':
+        return this.groupFor(raw)?.find((m) => m === raw || m.contains(raw)) ?? raw;
+      case 'region':
+        return raw;
+      case 'click':
+        return raw.closest(ACTIONABLE) ?? raw;
+      case 'hide':
+        return this.overlayRoot(raw);
+      default:
+        return this.snap(mode, raw, this.doc.body);
+    }
+  }
+
+  /** The popup around an element: its outermost fixed or sticky ancestor, else the element itself. */
+  private overlayRoot(el: Element): Element {
+    const view = this.doc.defaultView;
+    let root = el;
+    for (let cur: Element | null = el; cur && cur !== this.doc.body && cur !== this.doc.documentElement; cur = cur.parentElement) {
+      const position = view?.getComputedStyle(cur).position;
+      if (position === 'fixed' || position === 'sticky') root = cur;
+    }
+    return root;
+  }
 
   /** The repeated group (list of similar blocks) that contains `target`. */
   groupFor(target: Element): Element[] | null {
@@ -386,6 +468,12 @@ export class PickerEngine {
   pick(mode: Exclude<EngineMode, null>, target: Element): PickResult {
     const a = this.adapter;
     if (mode === 'region') return { kind: 'region', selector: uniqueSelector(a, target) };
+    if (mode === 'hide') return { kind: 'hide', selector: uniqueSelector(a, this.overlayRoot(target)) };
+    if (mode === 'click') {
+      const el = target.closest(ACTIONABLE) ?? target;
+      const text = normText(visibleText(el)) || el.getAttribute('aria-label') || el.getAttribute('value') || '';
+      return { kind: 'click', selector: uniqueSelector(a, el), text: text.slice(0, 120) };
+    }
 
     if (mode === 'item') {
       const members = this.groupFor(target);

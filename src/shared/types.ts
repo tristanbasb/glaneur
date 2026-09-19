@@ -266,6 +266,12 @@ export interface SystemInfo {
   items: number;
 }
 
+/** A button clicked in Chromium for the editor: the cookies that then apply to the page. */
+export interface ClickResult {
+  cookies: string;
+  finalUrl: string;
+}
+
 export interface AuthStatus {
   authenticated: boolean;
   setupRequired: boolean;

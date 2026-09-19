@@ -2,6 +2,7 @@ import type {
   AnalyzeResult,
   AppSettings,
   AuthStatus,
+  ClickResult,
   FeedDetail,
   FeedInput,
   FeedOptions,
@@ -82,6 +83,7 @@ export const api = {
     request<PreviewResult>('POST', '/api/preview', { source, options, fresh }),
   analyze: (url: string, render = false) => request<AnalyzeResult>('POST', '/api/analyze', { url, render }),
   jsonSample: (source: SourceConfig, options: FeedOptions) => request<{ data: unknown }>('POST', '/api/json-sample', { source, options }),
+  click: (body: { url: string; request: RequestOptions; selector: string; text: string }) => request<ClickResult>('POST', '/api/click', body),
 
   recipes: () => request<RecipeInfo[]>('GET', '/api/recipes'),
   buildRecipe: (id: string, params: Record<string, string | boolean>) =>

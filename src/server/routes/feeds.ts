@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
-import type { PreviewResult } from '../../shared/types.js';
+import type { ClickResult, PreviewResult } from '../../shared/types.js';
 import { analyzeUrl } from '../analyze.js';
+import { clickThrough } from '../core/browser.js';
 import { jsonFromHtml, parseJsonBody } from '../core/extract-json.js';
 import { escapeHtml } from '../core/html.js';
 import { normalizeUrl } from '../core/http.js';
@@ -138,6 +139,22 @@ export async function feedRoutes(app: FastifyInstance) {
   });
 
   // The page shown inside the visual selector (sandboxed iframe, same origin, no scripts).
+  // Clicks a button of the page in Chromium (a consent banner's, say) and hands back the cookies it earned.
+  app.post('/api/click', async (req, reply) => {
+    const body = (req.body ?? {}) as { url?: unknown; request?: unknown; selector?: unknown; text?: unknown };
+    const selector = typeof body.selector === 'string' ? body.selector.trim().slice(0, 1000) : '';
+    const text = typeof body.text === 'string' ? body.text.trim().slice(0, 200) : '';
+    const { request } = validateOptions({ request: body.request });
+    try {
+      const url = normalizeUrl(String(body.url ?? ''));
+      if (!selector && !text) throw new Error('Désignez le bouton à cliquer dans la page.');
+      const result: ClickResult = await clickThrough(url, request, { selector, text });
+      return result;
+    } catch (err) {
+      return reply.code(422).send({ error: errorMessage(err) });
+    }
+  });
+
   app.get<{ Querystring: { url?: string; render?: string; request?: string; fresh?: string } }>('/api/view', async (req, reply) => {
     // Only the editor may embed fetched pages: refuse navigations coming from other sites.
     const site = req.headers['sec-fetch-site'];

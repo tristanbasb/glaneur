@@ -72,6 +72,33 @@ export function leftAfterConsent(requested: string, before: string, after: strin
   return !wallRedirect(requested, before);
 }
 
+const CONSENT_COOKIE = /consent|didomi|optanon|cookiebot|cookieyes|axeptio|tarteaucitron|cmplz|borlabs|gdpr|usprivacy|cmp|^_?sp_|^guc|^a[13]$/i;
+
+/**
+ * Cookie header made of the cookies that apply to a page, consent choices first, kept short enough to travel in
+ * the address of the visual selector's page.
+ */
+export function cookieHeaderFor(cookies: Array<{ name: string; value: string; domain: string }>, url: string, max = 4000): string {
+  const host = new URL(url).hostname;
+  const applies = (domain: string) => {
+    const d = domain.replace(/^\./, '');
+    return host === d || host.endsWith(`.${d}`);
+  };
+  const byName = new Map<string, string>();
+  for (const c of cookies) if (applies(c.domain)) byName.set(c.name, c.value);
+  const pairs = [...byName]
+    .sort(([a], [b]) => Number(CONSENT_COOKIE.test(b)) - Number(CONSENT_COOKIE.test(a)))
+    .map(([name, value]) => `${name}=${value}`);
+  const kept: string[] = [];
+  let size = 0;
+  for (const pair of pairs) {
+    if (size + pair.length + 2 > max) continue;
+    kept.push(pair);
+    size += pair.length + 2;
+  }
+  return kept.join('; ');
+}
+
 /** Root elements of common consent managers: they cover the page, and their buttons need scripts. */
 export const CONSENT_BANNERS = [
   '#didomi-host', // Didomi

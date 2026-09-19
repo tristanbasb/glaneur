@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { consentCookies, cookieHeader, leftAfterConsent, wallRedirect } from '../src/server/core/consent.js';
+import { consentCookies, cookieHeader, cookieHeaderFor, leftAfterConsent, wallRedirect } from '../src/server/core/consent.js';
 import { prepareViewHtml } from '../src/server/view.js';
 
 describe('consent walls', () => {
@@ -27,6 +27,17 @@ describe('consent walls', () => {
     expect(leftAfterConsent('https://www.yahoo.com/', 'https://consent.yahoo.com/v2/collectConsent?sessionId=1', 'https://fr.yahoo.com/?guccounter=1')).toBe(false);
     expect(leftAfterConsent('https://site.fr/actus', 'https://site.fr/actus', 'https://www.site.fr/actus/?utm=1')).toBe(false);
     expect(leftAfterConsent('https://www.yahoo.com/', 'https://www.yahoo.com/', 'https://fr.yahoo.com/?p=us')).toBe(false);
+  });
+
+  it('keeps the cookies of the page, consent choices first, within a size limit', () => {
+    const cookies = [
+      { name: '_ga', value: 'x'.repeat(30), domain: '.site.fr' },
+      { name: 'euconsent-v2', value: 'CQabc', domain: '.site.fr' },
+      { name: 'other', value: '1', domain: 'autre.com' },
+      { name: 'didomi_token', value: 'tok', domain: 'www.site.fr' },
+    ];
+    expect(cookieHeaderFor(cookies, 'https://www.site.fr/actus')).toBe(`euconsent-v2=CQabc; didomi_token=tok; _ga=${'x'.repeat(30)}`);
+    expect(cookieHeaderFor(cookies, 'https://www.site.fr/actus', 40)).toBe('euconsent-v2=CQabc; didomi_token=tok');
   });
 
   it('hides consent banners in the visual selector without changing the page structure', () => {
