@@ -1,6 +1,7 @@
 // Loads a page by plain HTTP or through Chromium, with a small in-memory cache for the editor.
 import type { RenderOptions, RequestOptions } from '../../shared/types.js';
 import { renderPage } from './browser.js';
+import { ChallengeError, isChallengePage } from './challenge.js';
 import { ACCEPT_HTML, fetchText } from './http.js';
 
 export interface LoadedPage {
@@ -62,6 +63,8 @@ export async function loadPage(url: string, opts: LoadOptions = {}): Promise<Loa
     const r = await fetchText(url, { request: opts.request, method: opts.method, body: opts.body, accept: opts.accept ?? ACCEPT_HTML });
     page = { url, finalUrl: r.finalUrl, contentType: r.contentType, body: r.body, rendered: false, fetchedAt: Date.now() };
   }
+  // An anti-robot check page is not the page asked for: say so rather than extract from it.
+  if (isChallengePage(page.body)) throw new ChallengeError();
   remember(key, page);
   return page;
 }

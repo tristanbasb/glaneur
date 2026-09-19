@@ -1,6 +1,7 @@
 import type { RequestOptions } from '../../shared/types.js';
 import { getSettings } from '../settings.js';
 import { HttpError } from '../util.js';
+import { ChallengeError, isChallengePage } from './challenge.js';
 import { cookieHeader } from './consent.js';
 
 export interface FetchResult {
@@ -102,7 +103,17 @@ export async function fetchText(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
-    await res.body?.cancel().catch(() => undefined);
+    if (res.headers.get('cf-mitigated') === 'challenge') {
+      await res.body?.cancel().catch(() => undefined);
+      throw new ChallengeError();
+    }
+    // Anti-robot checks answer with these statuses: read the page to tell them from a plain refusal.
+    if (res.status === 403 || res.status === 429 || res.status === 503) {
+      const page = decodeBody(await readLimited(res).catch(() => new Uint8Array()), res.headers.get('content-type') ?? '');
+      if (isChallengePage(page)) throw new ChallengeError();
+    } else {
+      await res.body?.cancel().catch(() => undefined);
+    }
     throw new HttpError(res.status, url);
   }
   const contentType = res.headers.get('content-type') ?? '';

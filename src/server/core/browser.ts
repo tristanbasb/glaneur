@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { getSettings } from '../settings.js';
 import { HttpError, log, Semaphore } from '../util.js';
 import { type ConsentAction, consentScript, settleConsent } from './autoconsent.js';
+import { CHALLENGE_SHOWN, ChallengeError, isChallengePage } from './challenge.js';
 import { consentCookies, cookieHeaderFor, leftAfterConsent } from './consent.js';
 
 const CANDIDATES: Record<string, string[]> = {
@@ -150,6 +151,18 @@ async function openPage(context: BrowserContext, url: string, request: RequestOp
   return page;
 }
 
+/**
+ * Some anti-robot checks run by themselves and let a browser through after a few seconds: give them that time,
+ * as any browser would, without disguising anything. True when the check is still there (the caller gives up).
+ */
+async function stillChecking(page: Page): Promise<boolean> {
+  const shown = () => page.evaluate(CHALLENGE_SHOWN).then(Boolean, () => false);
+  if (!(await shown())) return false;
+  await page.waitForFunction(`!(${CHALLENGE_SHOWN})`, { timeout: 10_000 }).catch(() => undefined);
+  await page.waitForNetworkIdle({ idleTime: 500, timeout: 5000 }).catch(() => undefined);
+  return shown();
+}
+
 const SCROLL_SCRIPT = `(async () => {
   for (let i = 0; i < 6; i++) {
     window.scrollBy(0, window.innerHeight);
@@ -192,6 +205,7 @@ async function renderIn({ browser, url, render, request, lightweight }: RenderJo
     const timeout = (request?.timeoutSec ?? 35) * 1000;
     const response = await page.goto(url, { waitUntil: 'networkidle2', timeout });
     const status = response?.status() ?? 200;
+    if (await stillChecking(page)) throw new ChallengeError();
     const answered = await settleConsent(page);
     const before: string = firstDocument ?? url;
     if (action === 'optOut' && leftAfterConsent(url, before, page.url())) return null;
@@ -203,6 +217,8 @@ async function renderIn({ browser, url, render, request, lightweight }: RenderJo
       await page.waitForNetworkIdle({ idleTime: 500, timeout: 8000 }).catch(() => undefined);
       return page.content();
     });
+    // Checked before the status: check pages are short and answer with an error status.
+    if (isChallengePage(html)) throw new ChallengeError();
     if (status >= 400 && html.length < 3000) throw new HttpError(status, url);
     return { html, finalUrl: page.url(), status, consent: answered };
   } finally {
@@ -261,6 +277,7 @@ export function clickThrough(url: string, request: RequestOptions | undefined, t
     try {
       const page = await openPage(context, url, request, false);
       await page.goto(url, { waitUntil: 'networkidle2', timeout: (request?.timeoutSec ?? 35) * 1000 });
+      if (await stillChecking(page)) throw new ChallengeError();
       if (!(await clickTarget(page, target))) {
         throw new Error('Glaneur ne retrouve pas ce bouton dans la page qu’il a chargée : relisez la page, puis cliquez de nouveau.');
       }
